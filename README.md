@@ -1,6 +1,6 @@
 # ISSL
 
-Iterative Sound Source Localization
+The official implementation for the paper ["Iterative Sound Source Localization for Unknown Number of Sources"](https://arxiv.org/abs/2206.12273).
 
 ## Dataset
 
