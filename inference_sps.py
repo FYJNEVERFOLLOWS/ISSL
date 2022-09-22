@@ -14,35 +14,30 @@ plt.figure(dpi=600) # 将显示的所有图分辨率调高
 matplotlib.rcParams['axes.unicode_minus']=False # 显示符号
 from scipy.optimize import linear_sum_assignment
 
-import prepare_multi_sources_data
+import audio_dataloader
 import func
-import models
-import switch_neural_network
+import model
 from torch.autograd.variable import Variable
 from torch.utils.data import DataLoader
 
 
+# SPS: Spatial Pseudo-Specturm
 device = torch.device('cpu')
 # device = torch.device('cuda:0')
 
 
-##### args #####
-start_plot = 78 # start plotting after epoch XX
-
-def infer_one_epoch(epoch: int, val_data_path, test_data_path, output_path, pth_path, test_or_val, version):
+def infer_one_epoch(epoch: int, val_data_path, test_data_path, output_path, pth_path, test_or_val):
     infer_start = time.time()
-    spsnet = models.SPSnet()
+    ssnet = model.SSnet()
 
-    spsnet.load_state_dict(torch.load(pth_path, map_location=device))
-    # spsnet.load_state_dict(torch.load(pth_path))
-    # spsnet.to(device)
+    ssnet.load_state_dict(torch.load(pth_path, map_location=device))
 
     # Construct loss function and Optimizer.
     criterion_sps = torch.nn.MSELoss()
 
-    val_data = DataLoader(prepare_multi_sources_data.SSLR_Dataset(val_data_path), batch_size=100,
+    val_data = DataLoader(audio_dataloader.VCTK_Dataset(val_data_path), batch_size=100,
                         shuffle=True, num_workers=0)  # val_data is a tuple: (batch_x, batch_y, batch_z)
-    test_data = DataLoader(prepare_multi_sources_data.SSLR_Dataset(test_data_path), batch_size=100,
+    test_data = DataLoader(audio_dataloader.VCTK_Dataset(test_data_path), batch_size=100,
                         shuffle=True, num_workers=0)  # test_data is a tuple: (batch_x, batch_y, batch_z)
 
     model_save_path = os.path.dirname(output_path)                    
@@ -70,7 +65,7 @@ def infer_one_epoch(epoch: int, val_data_path, test_data_path, output_path, pth_
     pkl_data = []
 
     with torch.no_grad():
-        spsnet.eval()
+        ssnet.eval()
         for index, (batch_x, batch_y, batch_z) in enumerate(val_data):
             batch_x = batch_x.to(device) # batch_x.shape [B, 8, 7, 337]
             batch_y = batch_y.to(device) # batch_y.shape [B, 360]
@@ -79,29 +74,12 @@ def infer_one_epoch(epoch: int, val_data_path, test_data_path, output_path, pth_
             # batch_z.shape[0] = batch_size
 
             # 获得模型预测结果
-            a_1, output = spsnet(batch_x) # output.shape [B, 360]
+            a_1, output = ssnet(batch_x) # output.shape [B, 360]
             val_loss = criterion_sps(output, batch_y) # averaged loss on batch_y
             with torch.no_grad():
                 epoch_loss += batch_z.size(0) * val_loss.clone().detach().item()
                 sam_size += batch_z.size(0)
 
-
-            # Plot SPS
-            if epoch > start_plot:
-                line_pred, = plt.plot(output[0], c='b', label="pred_sps")
-                line_label, = plt.plot(batch_y[0], c='r', label="label_sps")
-                plt.title("Comparison between estimated and ground truth SPS")
-                plt.xlabel("DOA")
-                plt.ylabel("Likelihood")
-                plt.ylim((0, 1))
-                plt.legend(handles=[line_pred, line_label])
-                ax=plt.gca() # ax为两条坐标轴的实例
-                ax.xaxis.set_major_locator(MultipleLocator(30)) # 把x轴的主刻度设置为30的倍数
-                # ax.yaxis.set_major_locator(MultipleLocator(1)) # 把y轴的主刻度设置为1的倍数
-                if not os.path.exists(model_save_path + '/diff_sps'):
-                    os.makedirs(model_save_path + '/diff_sps')
-                plt.savefig(model_save_path + f'/diff_sps/val_{epoch + 1}th_epoch_{index}th_batch_{0}_nos_{num_sources}.png', dpi=600)
-                plt.close()
             for batch in range(batch_z.size(0)):
                 # validate for known number of sources
                 num_sources = batch_z[batch].item()
@@ -134,17 +112,13 @@ def infer_one_epoch(epoch: int, val_data_path, test_data_path, output_path, pth_
                     cnt_acc_2 += np.sum(abs_err <= 5)
                     sum_err_2 += abs_err.sum()
                     total_2 += 2
-                    # print(f'cnt_acc_multi {cnt_acc_multi} sum_err_multi {sum_err_multi} total_multi {total_multi}')
+
                 else:
                     pred = torch.tensor(func.get_topk_doa(output[batch], num_sources), dtype=torch.int, device=device)
-                    # print(f'multi-sources pred {pred}', flush=True)
-                    # print(f'multi-sources label {label}', flush=True)
                     
                     error = func.angular_distance(pred.reshape([num_sources, 1]), label.reshape([1, num_sources]))
                     row_ind, col_ind = linear_sum_assignment(error.numpy())
                     abs_err = error[row_ind, col_ind].numpy()
-                    # print(f'multi-sources error {error}', flush=True)
-                    # print(f'multi-sources abs_err {abs_err}', flush=True)
 
                     if num_sources == 3:
                         cnt_acc_3 += np.sum(abs_err <= 5)
@@ -190,8 +164,9 @@ def infer_one_epoch(epoch: int, val_data_path, test_data_path, output_path, pth_
     print('Two-sources MAE on val set: %.3f ' % (sum_err_2 / total_2), flush=True)             
     print('Three-sources accuracy on val set: %.2f %% ' % (100.0 * cnt_acc_3 / total_3), flush=True)
     print('Three-sources MAE on val set: %.3f ' % (sum_err_3 / total_3), flush=True)   
-    # print('Four-sources accuracy on val set: %.2f %% ' % (100.0 * cnt_acc_4 / total_4), flush=True)
-    # print('Four-sources MAE on val set: %.3f ' % (sum_err_4 / total_4), flush=True)   
+    if total_4 > 0:
+        print('Four-sources accuracy on val set: %.2f %% ' % (100.0 * cnt_acc_4 / total_4), flush=True)
+        print('Four-sources MAE on val set: %.3f ' % (sum_err_4 / total_4), flush=True)   
     print('Overall accuracy on val set: %.2f %% ' % (100.0 * cnt_acc / (total_1 + total_2 + total_3 + total_4)), flush=True)
     print('Overall MAE on val set: %.3f ' % (sum_err / (total_1 + total_2 + total_3 + total_4)), flush=True)
     torch.cuda.empty_cache()
@@ -218,7 +193,7 @@ def infer_one_epoch(epoch: int, val_data_path, test_data_path, output_path, pth_
     sum_err_th = 0
 
     with torch.no_grad():
-        spsnet.eval()
+        ssnet.eval()
         for index, (batch_x, batch_y, batch_z) in enumerate(test_data):
             batch_x = batch_x.to(device) # batch_x.shape [B, 8, 7, 337]
             batch_y = batch_y.to(device) # batch_y.shape [B, 360]
@@ -226,29 +201,12 @@ def infer_one_epoch(epoch: int, val_data_path, test_data_path, output_path, pth_
 
 
             # 获得模型预测结果
-            a_1, output = spsnet(batch_x) # output.shape [B, 360]
+            a_1, output = ssnet(batch_x) # output.shape [B, 360]
 
             for batch in range(batch_z.size(0)):
                 # test for known number of sources
                 num_sources = batch_z[batch].item()
                 total += num_sources
-
-
-                # Plot SPS
-                if epoch > start_plot + 10:
-                    line_pred, = plt.plot(output[batch], c='b', label="pred_sps")
-                    line_label, = plt.plot(batch_y[batch], c='r', label="label_sps")
-                    plt.title("Comparison between estimated and ground truth SPS")
-                    plt.xlabel("DOA")
-                    plt.ylabel("Likelihood")
-                    plt.legend(handles=[line_pred, line_label])
-                    ax=plt.gca() # ax为两条坐标轴的实例
-                    ax.xaxis.set_major_locator(MultipleLocator(30)) # 把x轴的主刻度设置为30的倍数
-                    # ax.yaxis.set_major_locator(MultipleLocator(1)) # 把y轴的主刻度设置为1的倍数
-                    if not os.path.exists(model_save_path + '/diff_sps'):
-                        os.makedirs(model_save_path + '/diff_sps')
-                    plt.savefig(model_save_path + f'/diff_sps/test_{epoch + 1}th_epoch_{index}th_batch_{batch}_nos_{num_sources}.png', dpi=600)
-                    plt.close()
                 
                 label = torch.where(batch_y[batch] == 1)[0]
 
@@ -322,49 +280,6 @@ def infer_one_epoch(epoch: int, val_data_path, test_data_path, output_path, pth_
                 sample_data = {"sps" : pspectrum, "num_sources" : num_sources}
                 pkl_data.append(sample_data)
 
-                # # Plot SPS
-                # if num_sources == 2:
-                #     line_pred, = plt.plot(pspectrum.cpu(), c='b')
-                #     # line_label, = plt.plot(batch_y[0].cpu(), c='r', label="label_sps")
-                #     # plt.title("Comparison between estimated and ground truth SPS")
-                #     plt.xlabel("DOA")
-                #     plt.ylabel("Likelihood")
-                #     plt.ylim((0, 1))
-                #     # plt.legend(handles=[line_pred])
-                #     ax=plt.gca() # ax为两条坐标轴的实例
-                #     ax.xaxis.set_major_locator(MultipleLocator(30)) # 把x轴的主刻度设置为30的倍数
-                #     # ax.yaxis.set_major_locator(MultipleLocator(1)) # 把y轴的主刻度设置为1的倍数
-                #     if not os.path.exists(model_save_path + '/pred_sps'):
-                #         os.makedirs(model_save_path + '/pred_sps')
-                #     plt.savefig(model_save_path + f'/pred_sps/test_{epoch + 1}th_epoch_{index}th_batch_{0}_nos_{num_sources}.png', dpi=600)
-                #     plt.close()
-
-                #     peak, new_pspectrum = func.pop_peak(pspectrum)
-                #     line_pred, = plt.plot(new_pspectrum.cpu(), c='b')
-                #     # line_label, = plt.plot(batch_y[0].cpu(), c='r', label="label_sps")
-                #     # plt.title("Comparison between estimated and ground truth SPS")
-                #     plt.xlabel("DOA")
-                #     plt.ylabel("Likelihood")
-                #     plt.ylim((0, 1))
-                #     # plt.legend(handles=[line_pred])
-                #     ax=plt.gca() # ax为两条坐标轴的实例
-                #     ax.xaxis.set_major_locator(MultipleLocator(30)) # 把x轴的主刻度设置为30的倍数
-                #     plt.savefig(model_save_path + f'/pred_sps/test_{epoch + 1}th_epoch_{index}th_batch_{0}_nos_{num_sources-1}.png', dpi=600)
-                #     plt.close()
-
-                #     peak, new_pspectrum = func.pop_peak(new_pspectrum)
-                #     line_pred, = plt.plot(new_pspectrum.cpu(), c='b')
-                #     # line_label, = plt.plot(batch_y[0].cpu(), c='r', label="label_sps")
-                #     # plt.title("Comparison between estimated and ground truth SPS")
-                #     plt.xlabel("DOA")
-                #     plt.ylabel("Likelihood")
-                #     plt.ylim((0, 1))
-                #     # plt.legend(handles=[line_pred])
-                #     ax=plt.gca() # ax为两条坐标轴的实例
-                #     ax.xaxis.set_major_locator(MultipleLocator(30)) # 把x轴的主刻度设置为30的倍数
-                #     plt.savefig(model_save_path + f'/pred_sps/test_{epoch + 1}th_epoch_{index}th_batch_{0}_nos_{num_sources-2}.png', dpi=600)
-                #     plt.close()
-
                 while num_sources > 0:
                     num_sources -= 1
                     peak, pspectrum = func.pop_peak(pspectrum)
@@ -394,8 +309,9 @@ def infer_one_epoch(epoch: int, val_data_path, test_data_path, output_path, pth_
     print('Two-sources MAE on test set: %.3f ' % (sum_err_2 / total_2), flush=True)             
     print('Three-sources accuracy on test set: %.2f %% ' % (100.0 * cnt_acc_3 / total_3), flush=True)
     print('Three-sources MAE on test set: %.3f ' % (sum_err_3 / total_3), flush=True)   
-    # print('Four-sources accuracy on test set: %.2f %% ' % (100.0 * cnt_acc_4 / total_4), flush=True)
-    # print('Four-sources MAE on test set: %.3f ' % (sum_err_4 / total_4), flush=True)   
+    if total_4 > 0:
+        print('Four-sources accuracy on test set: %.2f %% ' % (100.0 * cnt_acc_4 / total_4), flush=True)
+        print('Four-sources MAE on test set: %.3f ' % (sum_err_4 / total_4), flush=True)   
     print('Overall accuracy on test set: %.2f %% ' % (100.0 * cnt_acc / (total_1 + total_2 + total_3 + total_4)), flush=True)
     print('Overall MAE on test set: %.3f ' % (sum_err / (total_1 + total_2 + total_3 + total_4)), flush=True)
     print('===== Test results on unknown number of sources =====', flush=True)
